@@ -1,4 +1,3 @@
-
 const express = require("express");
 const fetch = (...args) => import("node-fetch").then(({default: f}) => f(...args));
 const app = express();
@@ -100,9 +99,7 @@ async function handleMessage(msg) {
         [{ text: "Dinar (IQD)", callback_data: "currency_IQD" }, { text: "Dollar (USD)", callback_data: "currency_USD" }]
       ]));
     } else {
-
-> Hawbir xom:
-await sendMsg(chatId, "Wshay nheni halaye! Dwbare hawl bdewe:");
+      await sendMsg(chatId, "Wshay nheni halaye! Dwbare hawl bdewe:");
     }
     return;
   }
