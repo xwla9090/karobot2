@@ -67,7 +67,7 @@ async function genReport(c, s) {
   var tConcRec=0, tConcDep=0, tMeters=0;
   for (var i=0;i<conc.length;i++) {
     var cc = conc[i].currency || "iqd";
-    var rec = Number(conc[i].received) || 0;
+    var rec = Number(conc[i].paidamount) || Number(conc[i].received) || 0;
     var dep = Number(conc[i].deposit) || 0;
     var met = Number(conc[i].meters) || 0;
     if (cur==="iqd") { tConcRec += cc==="iqd" ? rec : rec*rate; tConcDep += cc==="iqd" ? dep : dep*rate; }
