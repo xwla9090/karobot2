@@ -117,7 +117,8 @@ async function genReport(c, s) {
   r += "━━━━━━━━━━━━━━━\n";
   if (profit>=0) r += "✅ <b>قازانج: "+sym+fmt(profit)+"</b>";
   else r += "❌ <b>زەرەر: "+sym+fmt(Math.abs(profit))+"</b>";
-  await sm(c, r); rs(c);
+  await sm(c, r); s.step="menu"; s.currency=null; s.rate=1500; s.deposit="no"; s.dateFrom=null; s.dateTo=null;
+  await sm(c,"چی دەتەوێت؟",{reply_markup:{inline_keyboard:[[{text:"💰 قاسە",callback_data:"report_cash"}],[{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],[{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],[{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}]]}});
 }
 
 async function genExpList(c, s) {
@@ -137,7 +138,8 @@ async function genExpList(c, s) {
   txt += "کۆی دینار: <b>"+fmt(tI)+"</b>\n";
   txt += "کۆی دۆڵار: <b>$"+fmt(tU)+"</b>";
   if (!exp.length) txt = "هیچ خەرجییەک نییە";
-  await sm(c, txt); rs(c);
+  await sm(c, txt); s.step="menu"; s.currency=null; s.rate=1500; s.deposit="no"; s.dateFrom=null; s.dateTo=null;
+  await sm(c,"چی دەتەوێت؟",{reply_markup:{inline_keyboard:[[{text:"💰 قاسە",callback_data:"report_cash"}],[{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],[{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],[{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}]]}});
 }
 
 async function genConcList(c, s) {
@@ -159,7 +161,8 @@ async function genConcList(c, s) {
   txt += "تەئمین: <b>"+fmt(tD)+"</b>\n";
   txt += "مەتر: <b>"+fmt(tM)+"</b>";
   if (!conc.length) txt = "هیچ داتایەک نییە";
-  await sm(c, txt); rs(c);
+  await sm(c, txt); s.step="menu"; s.currency=null; s.rate=1500; s.deposit="no"; s.dateFrom=null; s.dateTo=null;
+  await sm(c,"چی دەتەوێت؟",{reply_markup:{inline_keyboard:[[{text:"💰 قاسە",callback_data:"report_cash"}],[{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],[{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],[{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}]]}});
 }
 
 async function handleCB(cb) {
