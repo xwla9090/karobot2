@@ -1,5 +1,6 @@
 const express = require("express");
 const fetch = (...args) => import("node-fetch").then(({default: f}) => f(...args));
+const FormData = require("form-data");
 const app = express();
 app.use(express.json());
 
@@ -10,7 +11,6 @@ const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsI
 const BACKUP_CHAT_ID = "176392487";
 
 var sessions = {};
-// تۆمارکردنی کاتی backup ی دوایین بۆ هەر پرۆژەیەک
 var lastBackupTime = {};
 
 function gs(c) { if (!sessions[c]) sessions[c] = {step:"start",project:null,password:null,currency:null,rate:1500,deposit:"no",dateFrom:null,dateTo:null}; return sessions[c]; }
@@ -53,32 +53,136 @@ async function getProject(projectName) {
 }
 
 // ==================== BACKUP ====================
-function makeCSV(headers, rows) {
-  var csv = "\uFEFF" + headers.join(",") + "\n";
-  rows.forEach(function(r) {
-    csv += r.map(function(c) { return '"' + String(c||"").replace(/"/g,'""') + '"'; }).join(",") + "\n";
+// دروستکردنی فایلی Excel (XLSX) لە سەر Binary شێواز
+// بەکارهێنانی SpreadsheetML (XML-based xlsx)
+function makeXLSX(sheets) {
+  // sheets = [{name, headers, rows}]
+  var sharedStrings = [];
+  var sharedMap = {};
+  
+  function addStr(s) {
+    s = String(s || "");
+    if (sharedMap[s] === undefined) {
+      sharedMap[s] = sharedStrings.length;
+      sharedStrings.push(s);
+    }
+    return sharedMap[s];
+  }
+  
+  // یەکەم: هەموو string ـەکان جمع بکە
+  sheets.forEach(function(sh) {
+    sh.headers.forEach(addStr);
+    sh.rows.forEach(function(r) { r.forEach(function(c) { addStr(c); }); });
   });
-  return csv;
+  
+  // دروستکردنی XML ی شیتەکان
+  var sheetsXML = sheets.map(function(sh, si) {
+    var xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    xml += '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+    xml += '<sheetData>';
+    
+    // header row
+    xml += '<row r="1">';
+    sh.headers.forEach(function(h, ci) {
+      var col = String.fromCharCode(65 + ci);
+      xml += '<c r="' + col + '1" t="s"><v>' + addStr(h) + '</v></c>';
+    });
+    xml += '</row>';
+    
+    // data rows
+    sh.rows.forEach(function(row, ri) {
+      xml += '<row r="' + (ri+2) + '">';
+      row.forEach(function(cell, ci) {
+        var col = String.fromCharCode(65 + ci);
+        var v = String(cell || "");
+        var num = Number(v);
+        if (!isNaN(num) && v !== "" && !v.match(/^\d{4}-\d{2}-\d{2}/)) {
+          xml += '<c r="' + col + (ri+2) + '"><v>' + num + '</v></c>';
+        } else {
+          xml += '<c r="' + col + (ri+2) + '" t="s"><v>' + addStr(v) + '</v></c>';
+        }
+      });
+      xml += '</row>';
+    });
+    
+    xml += '</sheetData></worksheet>';
+    return xml;
+  });
+  
+  // Shared Strings XML
+  var ssXML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  ssXML += '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="' + sharedStrings.length + '" uniqueCount="' + sharedStrings.length + '">';
+  sharedStrings.forEach(function(s) {
+    ssXML += '<si><t xml:space="preserve">' + s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;") + '</t></si>';
+  });
+  ssXML += '</sst>';
+  
+  // Workbook XML
+  var wbXML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  wbXML += '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+  wbXML += '<sheets>';
+  sheets.forEach(function(sh, si) {
+    wbXML += '<sheet name="' + sh.name.replace(/&/g,"&amp;") + '" sheetId="' + (si+1) + '" r:id="rId' + (si+1) + '"/>';
+  });
+  wbXML += '</sheets></workbook>';
+  
+  // Workbook Relationships
+  var wbRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  wbRels += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+  sheets.forEach(function(sh, si) {
+    wbRels += '<Relationship Id="rId' + (si+1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + (si+1) + '.xml"/>';
+  });
+  wbRels += '<Relationship Id="rId' + (sheets.length+1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>';
+  wbRels += '</Relationships>';
+  
+  // Content Types
+  var ctXML = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  ctXML += '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">';
+  ctXML += '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>';
+  ctXML += '<Default Extension="xml" ContentType="application/xml"/>';
+  ctXML += '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
+  ctXML += '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>';
+  sheets.forEach(function(sh, si) {
+    ctXML += '<Override PartName="/xl/worksheets/sheet' + (si+1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+  });
+  ctXML += '</Types>';
+  
+  // Root Relationships
+  var rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+  rootRels += '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+  rootRels += '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>';
+  rootRels += '</Relationships>';
+  
+  // ZIP بکە
+  var JSZip = require("jszip");
+  var zip = new JSZip();
+  zip.file("[Content_Types].xml", ctXML);
+  zip.file("_rels/.rels", rootRels);
+  zip.file("xl/workbook.xml", wbXML);
+  zip.file("xl/_rels/workbook.xml.rels", wbRels);
+  zip.file("xl/sharedStrings.xml", ssXML);
+  sheets.forEach(function(sh, si) {
+    zip.file("xl/worksheets/sheet" + (si+1) + ".xml", sheetsXML[si]);
+  });
+  
+  return zip.generateAsync({type:"nodebuffer", compression:"DEFLATE"});
 }
 
-async function sendDocument(chatId, content, filename, caption) {
-  try {
-    var { FormData, Blob } = await import("node-fetch");
-    var form = new FormData();
-    form.append("chat_id", String(chatId));
-    form.append("document", new Blob([content], {type:"text/csv"}), filename);
-    form.append("caption", caption);
-    await fetch(API+"/sendDocument", { method:"POST", body: form });
-  } catch(e) {
-    // Fallback: بەبێ FormData
-    console.log("[Backup] FormData error, trying buffer:", e.message);
-  }
+async function sendXLSX(chatId, buffer, filename, caption) {
+  var form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("document", buffer, { filename: filename, contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  form.append("caption", caption);
+  var resp = await fetch(API+"/sendDocument", { method:"POST", body: form });
+  var data = await resp.json();
+  if (!data.ok) console.error("[Backup] sendDocument error:", data);
+  return data;
 }
 
 async function doBackup(project, chatId, manual) {
   try {
     var today = new Date().toISOString().slice(0,10);
-    console.log("[Backup] Starting backup for:", project);
+    console.log("[Backup] Starting for:", project);
 
     var cashArr = await supa("cash?select=*&project=eq."+project);
     var cash = cashArr[0] || {cashiqd:0, cashusd:0};
@@ -95,48 +199,64 @@ async function doBackup(project, chatId, manual) {
     msg += "📊 خەرجی: <b>"+exp.length+"</b> تۆمار\n";
     msg += "🏗 سلفە: <b>"+conc.length+"</b> تۆمار\n";
     msg += "💳 قەرز: <b>"+loans.length+"</b> تۆمار\n";
-    msg += "👷 مقاول: <b>"+contr.length+"</b> تۆمار";
-
+    msg += "👷 مقاول: <b>"+contr.length+"</b> تۆمار\n\n";
+    msg += "⏳ فایلی Excel ئامادە دەکرێت...";
     await fetch(API+"/sendMessage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:chatId,text:msg,parse_mode:"HTML"})});
 
-    // فایلی خەرجی
-    if (exp.length > 0) {
-      var expCSV = makeCSV(
-        ["بەروار","بڕی دینار","بڕی دۆلار","ژمارەی وەسڵ","تێبینی"],
-        exp.map(function(e){return[e.date||"",e.amountiqd||0,e.amountusd||0,e.receiptno||"",e.note||""];})
-      );
-      await sendDocument(chatId, expCSV, "expenses_"+project+"_"+today+".csv", "📝 خەرجیەکان — "+project);
-    }
+    // دروستکردنی شیتەکان
+    var sheets = [];
 
-    // فایلی سلفە
-    if (conc.length > 0) {
-      var concCSV = makeCSV(
-        ["بەروار","دراو","مەتر","نرخی مەتر","کۆی گشتی","تەئمین","وەرگیراو","تێبینی"],
-        conc.map(function(c){return[c.date||"",c.currency||"",c.meters||0,c.pricepermeter||0,c.totalprice||0,c.deposit||0,c.received||0,c.note||""];})
-      );
-      await sendDocument(chatId, concCSV, "concrete_"+project+"_"+today+".csv", "🏗 سلفەی کۆنکریت — "+project);
-    }
+    // شیتی خەرجی
+    sheets.push({
+      name: "خەرجی",
+      headers: ["بەروار","بڕی دینار","بڕی دۆلار","ژمارەی وەسڵ","تێبینی"],
+      rows: exp.map(function(e){return[e.date||"",e.amountiqd||0,e.amountusd||0,e.receiptno||"",e.note||""];})
+    });
 
-    // فایلی قەرز
-    if (loans.length > 0) {
-      var loansCSV = makeCSV(
-        ["بەروار","جۆر","ناوی کەس","بڕی دینار","بڕی دۆلار","گەڕێنداوەتەوە","تێبینی"],
-        loans.map(function(l){return[l.date||"",l.type||"",l.personname||"",l.amountiqd||0,l.amountusd||0,l.returned?"بەڵێ":"نەخێر",l.note||""];})
-      );
-      await sendDocument(chatId, loansCSV, "loans_"+project+"_"+today+".csv", "💳 قەرز — "+project);
-    }
+    // شیتی سلفە
+    sheets.push({
+      name: "سلفەی کۆنکریت",
+      headers: ["بەروار","دراو","مەتر","نرخی مەتر","کۆی گشتی","تەئمین","وەرگیراو","تێبینی"],
+      rows: conc.map(function(c){return[c.date||"",c.currency||"",c.meters||0,c.pricepermeter||0,c.totalprice||0,c.deposit||0,c.received||0,c.note||""];})
+    });
 
-    // فایلی مقاول
-    if (contr.length > 0) {
-      var contrCSV = makeCSV(
-        ["بەروار","جۆر","ناوی کەس","بڕی دینار","بڕی دۆلار","تێبینی"],
-        contr.map(function(c){return[c.date||"",c.type||"",c.personname||"",c.amountiqd||0,c.amountusd||0,c.note||""];})
-      );
-      await sendDocument(chatId, contrCSV, "contractor_"+project+"_"+today+".csv", "👷 مقاول — "+project);
-    }
+    // شیتی قەرز
+    sheets.push({
+      name: "قەرز",
+      headers: ["بەروار","جۆر","ناوی کەس","بڕی دینار","بڕی دۆلار","گەڕێنداوەتەوە","تێبینی"],
+      rows: loans.map(function(l){return[l.date||"",l.type||"",l.personname||"",l.amountiqd||0,l.amountusd||0,l.returned?"بەڵێ":"نەخێر",l.note||""];})
+    });
+
+    // شیتی مقاول
+    sheets.push({
+      name: "مقاول",
+      headers: ["بەروار","جۆر","ناوی کەس","بڕی دینار","بڕی دۆلار","تێبینی"],
+      rows: contr.map(function(c){return[c.date||"",c.type||"",c.personname||"",c.amountiqd||0,c.amountusd||0,c.note||""];})
+    });
+
+    // شیتی خولاصە
+    sheets.push({
+      name: "خولاصە",
+      headers: ["بەش","زانیاری","نرخ"],
+      rows: [
+        ["قاسە","دینار",fmt(cash.cashiqd)],
+        ["قاسە","دۆلار","$"+fmt(cash.cashusd)],
+        ["خەرجی","ژماری تۆمار",exp.length],
+        ["سلفە","ژماری تۆمار",conc.length],
+        ["قەرز","ژماری تۆمار",loans.length],
+        ["مقاول","ژماری تۆمار",contr.length],
+        ["بەروار","Backup",today]
+      ]
+    });
+
+    // دروستکردنی XLSX
+    var xlsxBuffer = await makeXLSX(sheets);
+
+    // نێرستنی فایل
+    var filename = "backup_"+project+"_"+today+".xlsx";
+    await sendXLSX(chatId, xlsxBuffer, filename, "📊 Backup — "+project+" — "+today);
 
     lastBackupTime[project] = Date.now();
-
     var nextBackup = new Date(Date.now() + 10*24*60*60*1000).toISOString().slice(0,10);
     await fetch(API+"/sendMessage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
       chat_id:chatId,
@@ -144,13 +264,13 @@ async function doBackup(project, chatId, manual) {
       parse_mode:"HTML"
     })});
 
-    console.log("[Backup] ✅ Done for:", project);
+    console.log("[Backup] ✅ Done:", project);
   } catch(e) {
     console.error("[Backup] Error:", e);
+    await fetch(API+"/sendMessage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chat_id:chatId,text:"❌ هەڵە: "+e.message,parse_mode:"HTML"})});
   }
 }
 
-// هەر ١٠ ڕۆژ backup بۆ هەموو پرۆژەکان
 async function checkAndRunBackups() {
   try {
     var projects = await getProjects();
@@ -160,214 +280,118 @@ async function checkAndRunBackups() {
       var last = lastBackupTime[p] || 0;
       if (Date.now() - last >= TEN_DAYS) {
         await doBackup(p, BACKUP_CHAT_ID, false);
-        // چاوەڕێ بکە ١٠ چرکە نێوان هەر پرۆژەیەک
         await new Promise(function(r){setTimeout(r,10000);});
       }
     }
-  } catch(e) {
-    console.error("[Backup] checkAndRunBackups error:", e);
-  }
+  } catch(e) { console.error("[Backup] checkAndRunBackups error:", e); }
 }
 
-// هەر ٦ خولەک یەک جار پشکنین بکە
 setInterval(checkAndRunBackups, 6 * 60 * 60 * 1000);
-// دوای ١ خولەکی سەرەتا هەم پشکنین بکە
 setTimeout(checkAndRunBackups, 60 * 1000);
 // ==================== کۆتایی BACKUP ====================
+
+var MENU_KB = kb([
+  [{text:"💰 قاسە",callback_data:"report_cash"}],
+  [{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],
+  [{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],
+  [{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}],
+  [{text:"📦 Backup دەستی",callback_data:"report_backup"}]
+]);
 
 async function handleStart(c) {
   rs(c);
   var projects = await getProjects();
-  var buttons = [];
-  var row = [];
+  var buttons = [], row = [];
   for (var i = 0; i < projects.length; i++) {
-    row.push({text: "📁 " + (projects[i].label || projects[i].project), callback_data: "project_" + projects[i].project});
-    if (row.length === 2 || i === projects.length - 1) { buttons.push(row); row = []; }
+    row.push({text:"📁 "+(projects[i].label||projects[i].project), callback_data:"project_"+projects[i].project});
+    if (row.length===2||i===projects.length-1){buttons.push(row);row=[];}
   }
-  await sm(c, "سڵاو! بەخێر بێت بۆ <b>Karo Group Bot</b>\n\nتکایە پرۆژەیەک هەڵبژێرە:", kb(buttons));
+  await sm(c,"سڵاو! بەخێر بێت بۆ <b>Karo Group Bot</b>\n\nتکایە پرۆژەیەک هەڵبژێرە:",kb(buttons));
 }
 
 async function genReport(c, s) {
   var p=s.project, df=parseDate(s.dateFrom), dt=parseDate(s.dateTo), cur=s.currency, rate=s.rate, withDep=s.deposit==="yes";
-  if (!df || !dt) { await sm(c, "⚠️ بەروارەکان هەڵەن!"); s.step="menu"; return; }
-  var cashArr = await supa("cash?select=*&project=eq."+p);
-  var cash = cashArr[0] || {cashiqd:0,cashusd:0,exchangerate:1500};
-  var exp = await supa("expenses?select=*&project=eq."+p+"&date=gte."+df+"&date=lte."+dt);
-  var conc = await supa("concrete?select=*&project=eq."+p+"&date=gte."+df+"&date=lte."+dt);
-  var sym = cur==="usd"?"$":"";
-  var tExp = 0;
-  for (var i=0;i<exp.length;i++) {
-    var eI = Number(exp[i].amountiqd) || 0;
-    var eU = Number(exp[i].amountusd) || 0;
-    if (cur==="iqd") tExp += eI + eU * rate;
-    else tExp += eU + eI / rate;
-  }
-  tExp = Math.round(tExp);
-  var tConcRec=0, tConcDep=0, tMeters=0;
-  for (var i=0;i<conc.length;i++) {
-    var cc = conc[i].currency || "iqd";
-    var rec = Number(conc[i].received) || 0;
-    var dep = Number(conc[i].deposit) || 0;
-    var met = Number(conc[i].meters) || 0;
-    if (cur==="iqd") { tConcRec += cc==="iqd" ? rec : rec*rate; tConcDep += cc==="iqd" ? dep : dep*rate; }
-    else { tConcRec += cc==="usd" ? rec : rec/rate; tConcDep += cc==="usd" ? dep : dep/rate; }
-    tMeters += met;
-  }
-  tConcRec=Math.round(tConcRec); tConcDep=Math.round(tConcDep);
-  var tConcTotal = withDep ? tConcRec + tConcDep : tConcRec;
-  var profit = tConcTotal - tExp;
-  var r = "✅ <b>کەشف حیساب</b>\n\n";
-  r += "📁 پرۆژە: <b>"+p+"</b>\n";
-  r += "📅 لە: <b>"+df+"</b> تا: <b>"+dt+"</b>\n";
-  r += "💱 دراو: <b>"+(cur==="usd"?"USD":"IQD")+"</b> | نرخ: <b>"+fmt(rate)+"</b>\n";
-  r += "🔒 تەئمین: <b>"+(withDep?"بەڵێ":"نەخێر")+"</b>\n\n";
-  r += "━━━━━━━━━━━━━━━\n\n";
-  r += "💰 <b>قاسە:</b>\n   دینار: <b>"+fmt(cash.cashiqd)+"</b>\n   دۆڵار: <b>$"+fmt(cash.cashusd)+"</b>\n\n";
-  r += "📊 <b>خەرجی:</b> "+sym+"<b>"+fmt(tExp)+"</b>\n\n";
-  r += "🏗 <b>سلفە وەرگیراو:</b> "+sym+"<b>"+fmt(tConcRec)+"</b>\n";
-  r += "🔒 <b>تەئمین:</b> "+sym+"<b>"+fmt(tConcDep)+"</b>\n";
-  r += "📏 <b>مەتر:</b> <b>"+fmt(tMeters)+"</b>\n\n";
-  if (withDep) r += "📊 <b>سلفە+تەئمین:</b> "+sym+"<b>"+fmt(tConcTotal)+"</b>\n\n";
-  r += "━━━━━━━━━━━━━━━\n";
-  if (profit>=0) r += "✅ <b>قازانج: "+sym+fmt(profit)+"</b>";
-  else r += "❌ <b>زەرەر: "+sym+fmt(Math.abs(profit))+"</b>";
-  await sm(c, r);
-  s.step="menu"; s.currency=null; s.rate=1500; s.deposit="no"; s.dateFrom=null; s.dateTo=null;
-  await sm(c,"چی دەتەوێت؟",kb([[{text:"💰 قاسە",callback_data:"report_cash"}],[{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],[{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],[{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}],[{text:"📦 Backup دەستی",callback_data:"report_backup"}]]));
+  if(!df||!dt){await sm(c,"⚠️ بەروارەکان هەڵەن!");s.step="menu";return;}
+  var cashArr=await supa("cash?select=*&project=eq."+p);
+  var cash=cashArr[0]||{cashiqd:0,cashusd:0};
+  var exp=await supa("expenses?select=*&project=eq."+p+"&date=gte."+df+"&date=lte."+dt);
+  var conc=await supa("concrete?select=*&project=eq."+p+"&date=gte."+df+"&date=lte."+dt);
+  var sym=cur==="usd"?"$":"";
+  var tExp=0;
+  for(var i=0;i<exp.length;i++){var eI=Number(exp[i].amountiqd)||0,eU=Number(exp[i].amountusd)||0;if(cur==="iqd")tExp+=eI+eU*rate;else tExp+=eU+eI/rate;}
+  tExp=Math.round(tExp);
+  var tConcRec=0,tConcDep=0,tMeters=0;
+  for(var i=0;i<conc.length;i++){var cc=conc[i].currency||"iqd",rec=Number(conc[i].received)||0,dep=Number(conc[i].deposit)||0,met=Number(conc[i].meters)||0;if(cur==="iqd"){tConcRec+=cc==="iqd"?rec:rec*rate;tConcDep+=cc==="iqd"?dep:dep*rate;}else{tConcRec+=cc==="usd"?rec:rec/rate;tConcDep+=cc==="usd"?dep:dep/rate;}tMeters+=met;}
+  tConcRec=Math.round(tConcRec);tConcDep=Math.round(tConcDep);
+  var tConcTotal=withDep?tConcRec+tConcDep:tConcRec,profit=tConcTotal-tExp;
+  var r="✅ <b>کەشف حیساب</b>\n\n📁 پرۆژە: <b>"+p+"</b>\n📅 لە: <b>"+df+"</b> تا: <b>"+dt+"</b>\n💱 دراو: <b>"+(cur==="usd"?"USD":"IQD")+"</b> | نرخ: <b>"+fmt(rate)+"</b>\n🔒 تەئمین: <b>"+(withDep?"بەڵێ":"نەخێر")+"</b>\n\n━━━━━━━━━━━━━━━\n\n💰 <b>قاسە:</b>\n   دینار: <b>"+fmt(cash.cashiqd)+"</b>\n   دۆڵار: <b>$"+fmt(cash.cashusd)+"</b>\n\n📊 <b>خەرجی:</b> "+sym+"<b>"+fmt(tExp)+"</b>\n\n🏗 <b>سلفە وەرگیراو:</b> "+sym+"<b>"+fmt(tConcRec)+"</b>\n🔒 <b>تەئمین:</b> "+sym+"<b>"+fmt(tConcDep)+"</b>\n📏 <b>مەتر:</b> <b>"+fmt(tMeters)+"</b>\n\n";
+  if(withDep)r+="📊 <b>سلفە+تەئمین:</b> "+sym+"<b>"+fmt(tConcTotal)+"</b>\n\n";
+  r+="━━━━━━━━━━━━━━━\n"+(profit>=0?"✅ <b>قازانج: "+sym+fmt(profit)+"</b>":"❌ <b>زەرەر: "+sym+fmt(Math.abs(profit))+"</b>");
+  await sm(c,r);
+  s.step="menu";s.currency=null;s.rate=1500;s.deposit="no";s.dateFrom=null;s.dateTo=null;
+  await sm(c,"چی دەتەوێت؟",MENU_KB);
 }
 
 async function genExpList(c, s) {
-  var df=parseDate(s.dateFrom), dt=parseDate(s.dateTo);
-  if (!df || !dt) { await sm(c, "⚠️ بەروارەکان هەڵەن!"); s.step="menu"; return; }
-  var exp = await supa("expenses?select=*&project=eq."+s.project+"&date=gte."+df+"&date=lte."+dt);
-  var tI=0, tU=0;
-  var txt = "📝 <b>خەرجیەکان</b>\n";
-  txt += "لە: "+df+" تا: "+dt+"\n\n";
-  for (var i=0;i<exp.length;i++) {
-    var eI = Number(exp[i].amountiqd) || 0;
-    var eU = Number(exp[i].amountusd) || 0;
-    tI += eI; tU += eU;
-    txt += "🔹 "+(exp[i].date||"")+" | "+fmt(eI)+" IQD | $"+fmt(eU)+" | "+(exp[i].note||"")+"\n";
-  }
-  txt += "\n━━━━━━━━━━\n";
-  txt += "کۆی دینار: <b>"+fmt(tI)+"</b>\n";
-  txt += "کۆی دۆڵار: <b>$"+fmt(tU)+"</b>";
-  if (!exp.length) txt = "هیچ خەرجییەک نییە";
-  await sm(c, txt);
-  s.step="menu"; s.currency=null; s.rate=1500; s.deposit="no"; s.dateFrom=null; s.dateTo=null;
-  await sm(c,"چی دەتەوێت؟",kb([[{text:"💰 قاسە",callback_data:"report_cash"}],[{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],[{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],[{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}],[{text:"📦 Backup دەستی",callback_data:"report_backup"}]]));
+  var df=parseDate(s.dateFrom),dt=parseDate(s.dateTo);
+  if(!df||!dt){await sm(c,"⚠️ بەروارەکان هەڵەن!");s.step="menu";return;}
+  var exp=await supa("expenses?select=*&project=eq."+s.project+"&date=gte."+df+"&date=lte."+dt);
+  var tI=0,tU=0,txt="📝 <b>خەرجیەکان</b>\nلە: "+df+" تا: "+dt+"\n\n";
+  for(var i=0;i<exp.length;i++){var eI=Number(exp[i].amountiqd)||0,eU=Number(exp[i].amountusd)||0;tI+=eI;tU+=eU;txt+="🔹 "+(exp[i].date||"")+" | "+fmt(eI)+" IQD | $"+fmt(eU)+" | "+(exp[i].note||"")+"\n";}
+  txt+="\n━━━━━━━━━━\nکۆی دینار: <b>"+fmt(tI)+"</b>\nکۆی دۆڵار: <b>$"+fmt(tU)+"</b>";
+  if(!exp.length)txt="هیچ خەرجییەک نییە";
+  await sm(c,txt);
+  s.step="menu";s.currency=null;s.rate=1500;s.deposit="no";s.dateFrom=null;s.dateTo=null;
+  await sm(c,"چی دەتەوێت؟",MENU_KB);
 }
 
 async function genConcList(c, s) {
-  var df=parseDate(s.dateFrom), dt=parseDate(s.dateTo);
-  if (!df || !dt) { await sm(c, "⚠️ بەروارەکان هەڵەن!"); s.step="menu"; return; }
-  var conc = await supa("concrete?select=*&project=eq."+s.project+"&date=gte."+df+"&date=lte."+dt);
-  var tR=0, tD=0, tM=0;
-  var txt = "🏗 <b>سلفە کۆنکریت</b>\n";
-  txt += "لە: "+df+" تا: "+dt+"\n\n";
-  for (var i=0;i<conc.length;i++) {
-    var rec = Number(conc[i].received) || 0;
-    var dep = Number(conc[i].deposit) || 0;
-    var met = Number(conc[i].meters) || 0;
-    tR += rec; tD += dep; tM += met;
-    txt += "🔹 "+(conc[i].date||"")+" | "+fmt(met)+"m | "+fmt(rec)+" | تەئمین:"+fmt(dep)+" | "+(conc[i].note||"")+"\n";
-  }
-  txt += "\n━━━━━━━━━━\n";
-  txt += "وەرگیراو: <b>"+fmt(tR)+"</b>\n";
-  txt += "تەئمین: <b>"+fmt(tD)+"</b>\n";
-  txt += "مەتر: <b>"+fmt(tM)+"</b>";
-  if (!conc.length) txt = "هیچ داتایەک نییە";
-  await sm(c, txt);
-  s.step="menu"; s.currency=null; s.rate=1500; s.deposit="no"; s.dateFrom=null; s.dateTo=null;
-  await sm(c,"چی دەتەوێت؟",kb([[{text:"💰 قاسە",callback_data:"report_cash"}],[{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],[{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],[{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}],[{text:"📦 Backup دەستی",callback_data:"report_backup"}]]));
+  var df=parseDate(s.dateFrom),dt=parseDate(s.dateTo);
+  if(!df||!dt){await sm(c,"⚠️ بەروارەکان هەڵەن!");s.step="menu";return;}
+  var conc=await supa("concrete?select=*&project=eq."+s.project+"&date=gte."+df+"&date=lte."+dt);
+  var tR=0,tD=0,tM=0,txt="🏗 <b>سلفە کۆنکریت</b>\nلە: "+df+" تا: "+dt+"\n\n";
+  for(var i=0;i<conc.length;i++){var rec=Number(conc[i].received)||0,dep=Number(conc[i].deposit)||0,met=Number(conc[i].meters)||0;tR+=rec;tD+=dep;tM+=met;txt+="🔹 "+(conc[i].date||"")+" | "+fmt(met)+"m | "+fmt(rec)+" | تەئمین:"+fmt(dep)+" | "+(conc[i].note||"")+"\n";}
+  txt+="\n━━━━━━━━━━\nوەرگیراو: <b>"+fmt(tR)+"</b>\nتەئمین: <b>"+fmt(tD)+"</b>\nمەتر: <b>"+fmt(tM)+"</b>";
+  if(!conc.length)txt="هیچ داتایەک نییە";
+  await sm(c,txt);
+  s.step="menu";s.currency=null;s.rate=1500;s.deposit="no";s.dateFrom=null;s.dateTo=null;
+  await sm(c,"چی دەتەوێت؟",MENU_KB);
 }
 
 async function handleCB(cb) {
-  var c=cb.message.chat.id, d=cb.data, s=gs(c);
+  var c=cb.message.chat.id,d=cb.data,s=gs(c);
   fetch(API+"/answerCallbackQuery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({callback_query_id:cb.id})});
-  if (d.startsWith("project_")) {
-    s.project = d.replace("project_","");
-    s.step = "password";
-    await sm(c,"پرۆژەی <b>"+s.project+"</b> هەڵبژێردرا ✅\n\nتکایە وشەی نهێنی بنووسە:");
-    return;
-  }
-  if (d==="report_cash") {
-    var cashArr = await supa("cash?select=*&project=eq."+s.project);
-    var cash = cashArr[0] || {cashiqd:0,cashusd:0};
-    await sm(c,"💰 <b>قاسە</b>\n\nدینار: <b>"+fmt(cash.cashiqd)+"</b>\nدۆڵار: <b>$"+fmt(cash.cashusd)+"</b>");
-    await sm(c,"چی دەتەوێت؟",kb([[{text:"💰 قاسە",callback_data:"report_cash"}],[{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],[{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],[{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}],[{text:"📦 Backup دەستی",callback_data:"report_backup"}]]));
-    return;
-  }
-  if (d==="report_backup") {
-    await sm(c,"📦 <b>Backup دەستی</b>\n\nبەخێر بکە چاوەڕێ بکە...");
-    await doBackup(s.project, c, true);
-    return;
-  }
-  if (d==="report_monthly") { s.step="m_currency"; await sm(c,"دراو هەڵبژێرە:",kb([[{text:"🇮🇶 دینار",callback_data:"cur_iqd"},{text:"🇺🇸 دۆڵار",callback_data:"cur_usd"}]])); return; }
-  if (d==="report_expenses") { s.step="exp_df"; await sm(c,"بەرواری سەرەتا:\nبۆ نموونە: <code>01/06/2026</code> یان <code>2026-06-01</code>"); return; }
-  if (d==="report_concrete") { s.step="conc_df"; await sm(c,"بەرواری سەرەتا:\nبۆ نموونە: <code>01/06/2026</code> یان <code>2026-06-01</code>"); return; }
-  if (d==="cur_iqd"||d==="cur_usd") { s.currency=d.replace("cur_",""); s.step="m_rate"; await sm(c,"نرخی ئاڵوگۆڕ:\nبۆ نموونە: <code>1500</code>"); return; }
-  if (d==="dep_yes"||d==="dep_no") { s.deposit=d.replace("dep_",""); s.step="m_df"; await sm(c,"بەرواری سەرەتا:\nبۆ نموونە: <code>01/06/2026</code> یان <code>2026-06-01</code>"); return; }
+  if(d.startsWith("project_")){s.project=d.replace("project_","");s.step="password";await sm(c,"پرۆژەی <b>"+s.project+"</b> هەڵبژێردرا ✅\n\nتکایە وشەی نهێنی بنووسە:");return;}
+  if(d==="report_cash"){var cashArr=await supa("cash?select=*&project=eq."+s.project);var cash=cashArr[0]||{cashiqd:0,cashusd:0};await sm(c,"💰 <b>قاسە</b>\n\nدینار: <b>"+fmt(cash.cashiqd)+"</b>\nدۆڵار: <b>$"+fmt(cash.cashusd)+"</b>");await sm(c,"چی دەتەوێت؟",MENU_KB);return;}
+  if(d==="report_backup"){await sm(c,"📦 Backup دەستی دەستی پێکرد...");await doBackup(s.project,c,true);return;}
+  if(d==="report_monthly"){s.step="m_currency";await sm(c,"دراو هەڵبژێرە:",kb([[{text:"🇮🇶 دینار",callback_data:"cur_iqd"},{text:"🇺🇸 دۆڵار",callback_data:"cur_usd"}]]));return;}
+  if(d==="report_expenses"){s.step="exp_df";await sm(c,"بەرواری سەرەتا:\nبۆ نموونە: <code>01/06/2026</code>");return;}
+  if(d==="report_concrete"){s.step="conc_df";await sm(c,"بەرواری سەرەتا:\nبۆ نموونە: <code>01/06/2026</code>");return;}
+  if(d==="cur_iqd"||d==="cur_usd"){s.currency=d.replace("cur_","");s.step="m_rate";await sm(c,"نرخی ئاڵوگۆڕ:\nبۆ نموونە: <code>1500</code>");return;}
+  if(d==="dep_yes"||d==="dep_no"){s.deposit=d.replace("dep_","");s.step="m_df";await sm(c,"بەرواری سەرەتا:\nبۆ نموونە: <code>01/06/2026</code>");return;}
 }
 
 async function handleMsg(msg) {
-  var c=msg.chat.id, t=(msg.text||"").trim();
-  if (t==="/start") return handleStart(c);
-  if (t==="/backup") {
-    var s=gs(c);
-    if (!s.project) { await sm(c,"تکایە یەکەم /start بنووسە و پرۆژەیەک هەڵبژێرە"); return; }
-    await sm(c,"📦 Backup دەستی...");
-    await doBackup(s.project, c, true);
-    return;
-  }
+  var c=msg.chat.id,t=(msg.text||"").trim();
+  if(t==="/start")return handleStart(c);
+  if(t==="/backup"){var s=gs(c);if(!s.project){await sm(c,"تکایە یەکەم /start بنووسە");return;}await sm(c,"📦 Backup دەستی...");await doBackup(s.project,c,true);return;}
   var s=gs(c);
-  if (s.step==="password") {
-    var user = await getProject(s.project);
-    if (user && t === user.password) {
-      s.step="menu";
-      await sm(c,"وشەی نهێنی ڕاستە ✅\n\nچی دەتەوێت؟",kb([
-        [{text:"💰 قاسە",callback_data:"report_cash"}],
-        [{text:"📊 کەشف حیساب",callback_data:"report_monthly"}],
-        [{text:"📝 خەرجیەکان",callback_data:"report_expenses"}],
-        [{text:"🏗 سلفە کۆنکریت",callback_data:"report_concrete"}],
-        [{text:"📦 Backup دەستی",callback_data:"report_backup"}]
-      ]));
-    } else { await sm(c,"⚠️ وشەی نهێنی هەڵەیە!"); }
-    return;
-  }
-  if (s.step==="m_rate") { s.rate=Number(t)||1500; s.step="m_dep"; await sm(c,"تەئمین لە قازانجدا هەبێت؟",kb([[{text:"✅ بەڵێ",callback_data:"dep_yes"},{text:"❌ نەخێر",callback_data:"dep_no"}]])); return; }
-  if (s.step==="m_df") {
-    if (!isValidDate(t)) { await sm(c,"⚠️ بەروار هەڵەیە!\nبۆ نموونە: <code>01/06/2026</code>"); return; }
-    s.dateFrom=t; s.step="m_dt"; await sm(c,"بەرواری کۆتایی:\nبۆ نموونە: <code>30/06/2026</code>"); return;
-  }
-  if (s.step==="m_dt") {
-    if (!isValidDate(t)) { await sm(c,"⚠️ بەروار هەڵەیە!"); return; }
-    s.dateTo=t; await genReport(c,s); return;
-  }
-  if (s.step==="exp_df") {
-    if (!isValidDate(t)) { await sm(c,"⚠️ بەروار هەڵەیە!"); return; }
-    s.dateFrom=t; s.step="exp_dt"; await sm(c,"بەرواری کۆتایی:\nبۆ نموونە: <code>30/06/2026</code>"); return;
-  }
-  if (s.step==="exp_dt") {
-    if (!isValidDate(t)) { await sm(c,"⚠️ بەروار هەڵەیە!"); return; }
-    s.dateTo=t; await genExpList(c,s); return;
-  }
-  if (s.step==="conc_df") {
-    if (!isValidDate(t)) { await sm(c,"⚠️ بەروار هەڵەیە!"); return; }
-    s.dateFrom=t; s.step="conc_dt"; await sm(c,"بەرواری کۆتایی:\nبۆ نموونە: <code>30/06/2026</code>"); return;
-  }
-  if (s.step==="conc_dt") {
-    if (!isValidDate(t)) { await sm(c,"⚠️ بەروار هەڵەیە!"); return; }
-    s.dateTo=t; await genConcList(c,s); return;
-  }
+  if(s.step==="password"){var user=await getProject(s.project);if(user&&t===user.password){s.step="menu";await sm(c,"وشەی نهێنی ڕاستە ✅\n\nچی دەتەوێت؟",MENU_KB);}else{await sm(c,"⚠️ وشەی نهێنی هەڵەیە!");}return;}
+  if(s.step==="m_rate"){s.rate=Number(t)||1500;s.step="m_dep";await sm(c,"تەئمین لە قازانجدا هەبێت؟",kb([[{text:"✅ بەڵێ",callback_data:"dep_yes"},{text:"❌ نەخێر",callback_data:"dep_no"}]]));return;}
+  if(s.step==="m_df"){if(!isValidDate(t)){await sm(c,"⚠️ بەروار هەڵەیە!");return;}s.dateFrom=t;s.step="m_dt";await sm(c,"بەرواری کۆتایی:");return;}
+  if(s.step==="m_dt"){if(!isValidDate(t)){await sm(c,"⚠️ بەروار هەڵەیە!");return;}s.dateTo=t;await genReport(c,s);return;}
+  if(s.step==="exp_df"){if(!isValidDate(t)){await sm(c,"⚠️ بەروار هەڵەیە!");return;}s.dateFrom=t;s.step="exp_dt";await sm(c,"بەرواری کۆتایی:");return;}
+  if(s.step==="exp_dt"){if(!isValidDate(t)){await sm(c,"⚠️ بەروار هەڵەیە!");return;}s.dateTo=t;await genExpList(c,s);return;}
+  if(s.step==="conc_df"){if(!isValidDate(t)){await sm(c,"⚠️ بەروار هەڵەیە!");return;}s.dateFrom=t;s.step="conc_dt";await sm(c,"بەرواری کۆتایی:");return;}
+  if(s.step==="conc_dt"){if(!isValidDate(t)){await sm(c,"⚠️ بەروار هەڵەیە!");return;}s.dateTo=t;await genConcList(c,s);return;}
   await sm(c,"بۆ دەستپێکردن /start بنووسە");
 }
 
 app.post("/webhook/"+TOKEN,function(q,r){var u=q.body;if(u.callback_query)handleCB(u.callback_query);else if(u.message)handleMsg(u.message);r.sendStatus(200);});
-app.get("/",function(q,r){r.send("Karo Bot v7 - Auto Backup");});
+app.get("/",function(q,r){r.send("Karo Bot v8 - XLSX Backup");});
 var PORT=process.env.PORT||3000;
 app.listen(PORT,async function(){
-  console.log("Server on port "+PORT);
+  console.log("Karo Bot v8 on port "+PORT);
   var U=process.env.RENDER_EXTERNAL_URL;
-  if(U){var w=U+"/webhook/"+TOKEN;var r=await fetch(API+"/setWebhook",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:w})});var d=await r.json();console.log("Webhook:",d);}
+  if(U){var w=U+"/webhook/"+TOKEN;var res=await fetch(API+"/setWebhook",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:w})});var d=await res.json();console.log("Webhook:",d);}
 });
