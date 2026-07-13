@@ -49,6 +49,12 @@ function parseDate(d) {
   // YYYY-MM-DD
   var m3 = d.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
   if (m3) return m3[1] + "-" + m3[2].padStart(2,"0") + "-" + m3[3].padStart(2,"0");
+  // YYYY/MM/DD
+  var m4 = d.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (m4) return m4[1] + "-" + m4[2].padStart(2,"0") + "-" + m4[3].padStart(2,"0");
+  // MM/DD/YYYY (ئەمریکی)
+  var m5 = d.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (m5) return m5[3] + "-" + m5[2].padStart(2,"0") + "-" + m5[1].padStart(2,"0");
   return null;
 }
 function isValidDate(d) { return parseDate(d) !== null; }
@@ -293,17 +299,23 @@ async function genExpList(c, s) {
     tI+=eI;tU+=eU;
     lines.push("🔹 "+(exp[i].date||"")+" | "+fmt(eI)+" IQD | $"+fmt(eU)+" | "+(exp[i].note||""));
   }
-  var txt;
   if(!exp.length){
-    txt="هیچ خەرجییەک نییە لەو ماوەیەدا\n📅 لە: "+df+" تا: "+dt;
+    await sm(c,"هیچ خەرجییەک نییە لەو ماوەیەدا\n📅 لە: "+df+" تا: "+dt);
   } else {
-    txt="📝 <b>خەرجیەکان</b>\nلە: "+df+" تا: "+dt+"\n\n"+lines.join("\n")+"\n\n━━━━━━━━━━\nکۆی دینار: <b>"+fmt(tI)+"</b>\nکۆی دۆڵار: <b>$"+fmt(tU)+"</b>";
-    // ئەگەر تێکست زۆر درێژ بوو، تەنها تۆتال نیشان بدە
-    if(txt.length > 4000) {
-      txt="📝 <b>خەرجیەکان</b>\nلە: "+df+" تا: "+dt+"\n\n📊 ژماری تۆمار: <b>"+exp.length+"</b>\n\n━━━━━━━━━━\nکۆی دینار: <b>"+fmt(tI)+"</b>\nکۆی دۆڵار: <b>$"+fmt(tU)+"</b>";
+    // پارچە پارچە بنێرە ئەگەر زۆر بوو
+    var header = "📝 <b>خەرجیەکان</b>\nلە: "+df+" تا: "+dt+"\n\n";
+    var footer = "\n━━━━━━━━━━\nکۆی دینار: <b>"+fmt(tI)+"</b>\nکۆی دۆڵار: <b>$"+fmt(tU)+"</b>\nژماری تۆمار: <b>"+exp.length+"</b>";
+    var chunk = header;
+    for(var li=0;li<lines.length;li++){
+      if((chunk+lines[li]).length > 3800){
+        await sm(c,chunk);
+        chunk = "";
+      }
+      chunk += lines[li]+"\n";
     }
+    chunk += footer;
+    await sm(c,chunk);
   }
-  await sm(c,txt);
   resetToMenu(s);
   await sm(c,"چی دەتەوێت؟",MENU_KB);
 }
